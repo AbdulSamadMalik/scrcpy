@@ -10,6 +10,10 @@
 #include "util/log.h"
 #include "util/sdl.h"
 
+#ifdef __APPLE__
+# include "sys/macos/window.h"
+#endif
+
 #define DISPLAY_MARGINS 96
 
 #define DOWNCAST(SINK) container_of(SINK, struct sc_screen, frame_sink)
@@ -570,6 +574,11 @@ sc_screen_init(struct sc_screen *screen,
         LOGE("Could not create window: %s", SDL_GetError());
         goto error_destroy_fps_counter;
     }
+
+#ifdef __APPLE__
+    // sc_macos_set_window_corner_radius(screen->window, 50.0f);
+    sc_macos_set_window_corner_radius(screen->window, 36.0f);
+#endif
 
     screen->renderer = SDL_CreateRenderer(screen->window, NULL);
     if (!screen->renderer) {

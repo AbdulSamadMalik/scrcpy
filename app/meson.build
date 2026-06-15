@@ -95,6 +95,8 @@ else
     ]
     if host_machine.system() == 'darwin'
         feature_test_macros += '-D_DARWIN_C_SOURCE'
+        src += [ 'src/sys/macos/window.m' ]
+        add_languages('objc', native: false)
     endif
 endif
 
@@ -141,6 +143,10 @@ endif
 if host_machine.system() == 'windows'
     dependencies += cc.find_library('mingw32')
     dependencies += cc.find_library('ws2_32')
+endif
+
+if host_machine.system() == 'darwin'
+    dependencies += dependency('appleframeworks', modules: ['Cocoa'])
 endif
 
 check_functions = [
