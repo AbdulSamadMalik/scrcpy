@@ -95,8 +95,11 @@ else
     ]
     if host_machine.system() == 'darwin'
         feature_test_macros += '-D_DARWIN_C_SOURCE'
-        src += [ 'src/sys/macos/window.m' ]
         add_languages('objc', native: false)
+        # window.m uses ARC; compile it separately with -fobjc-arc so the flag
+        # does not leak into the rest of the (non-ARC) Objective-C translation units.
+        src += files('src/sys/macos/window.m')
+        add_project_arguments('-fobjc-arc', language: 'objc')
     endif
 endif
 

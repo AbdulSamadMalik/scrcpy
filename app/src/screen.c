@@ -575,11 +575,6 @@ sc_screen_init(struct sc_screen *screen,
         goto error_destroy_fps_counter;
     }
 
-#ifdef __APPLE__
-    // sc_macos_set_window_corner_radius(screen->window, 50.0f);
-    sc_macos_set_window_corner_radius(screen->window, 36.0f);
-#endif
-
     screen->renderer = SDL_CreateRenderer(screen->window, NULL);
     if (!screen->renderer) {
         LOGE("Could not create renderer: %s", SDL_GetError());
@@ -703,6 +698,9 @@ sc_screen_init(struct sc_screen *screen,
         // Show the window immediately
         screen->window_shown = true;
         sc_sdl_show_window(screen->window);
+#ifdef __APPLE__
+        sc_macos_setup_hover_titlebar(screen->window);
+#endif
 
         if (sc_screen_is_relative_mode(screen)) {
             // Capture mouse immediately if video mirroring is disabled
@@ -771,6 +769,11 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
 
     screen->window_shown = true;
     sc_sdl_show_window(screen->window);
+#ifdef __APPLE__
+    // Must be called after the window is shown and the Metal renderer is fully
+    // set up — the CAMetalLayer must exist before we overlay our titlebar view.
+    sc_macos_setup_hover_titlebar(screen->window);
+#endif
     sc_screen_update_content_rect(screen);
 }
 
