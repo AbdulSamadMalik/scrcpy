@@ -22,6 +22,12 @@ static void
 set_aspect_ratio(struct sc_screen *screen, struct sc_size content_size) {
     assert(content_size.width && content_size.height);
 
+#ifdef __APPLE__
+    // The window is not resizable by the user (iPhone-Mirroring-like chrome
+    // with fixed insets), so an aspect ratio lock is unnecessary; it would
+    // also be incorrect, since the window includes the chrome insets
+    (void) screen;
+#else
     if (screen->window_aspect_ratio_lock) {
         float ar = (float) content_size.width / content_size.height;
         bool ok = SDL_SetWindowAspectRatio(screen->window, ar, ar);
@@ -29,6 +35,7 @@ set_aspect_ratio(struct sc_screen *screen, struct sc_size content_size) {
             LOGW("Could not set window aspect ratio: %s", SDL_GetError());
         }
     }
+#endif
 }
 
 static inline struct sc_size
@@ -50,6 +57,31 @@ is_windowed(struct sc_screen *screen) {
                                                  | SDL_WINDOW_MINIMIZED
                                                  | SDL_WINDOW_MAXIMIZED));
 }
+
+#ifdef __APPLE__
+// The macOS chrome (hover title bar + padded frame) reserves fixed insets
+// around the video content, so the window is larger than the content area
+
+static inline struct sc_size
+sc_macos_add_insets(struct sc_size size) {
+    size.width += 2 * SC_MACOS_INSET_SIDE;
+    size.height += SC_MACOS_INSET_TOP + SC_MACOS_INSET_SIDE;
+    return size;
+}
+
+static inline struct sc_size
+sc_macos_remove_insets(struct sc_size size) {
+    uint16_t horizontal = 2 * SC_MACOS_INSET_SIDE;
+    uint16_t vertical = SC_MACOS_INSET_TOP + SC_MACOS_INSET_SIDE;
+    if (size.width > horizontal) {
+        size.width -= horizontal;
+    }
+    if (size.height > vertical) {
+        size.height -= vertical;
+    }
+    return size;
+}
+#endif
 
 // get the preferred display bounds (i.e. the screen bounds with some margins)
 static bool
@@ -231,8 +263,29 @@ sc_screen_update_content_rect(struct sc_screen *screen) {
     bool is_icon = !screen->video || screen->disconnected;
 
     struct sc_size window_size = sc_sdl_get_window_size(screen->window);
+#ifdef __APPLE__
+    // In windowed mode, the content is inset inside the chrome (title bar on
+    // top, padded frame on the other sides), like iPhone Mirroring
+    bool insets = is_windowed(screen);
+    if (insets) {
+        window_size = sc_macos_remove_insets(window_size);
+    }
     compute_content_rect(window_size, screen->content_size, is_icon,
                          screen->render_fit, &screen->rect);
+    if (insets) {
+        screen->rect.x += SC_MACOS_INSET_SIDE;
+        screen->rect.y += SC_MACOS_INSET_TOP;
+    }
+
+    // Keep the native chrome overlay (frame shape + rounded video mask) in
+    // sync with where the video is actually rendered
+    sc_macos_update_video_rect(screen->window, screen->rect.x, screen->rect.y,
+                               screen->rect.w, screen->rect.h,
+                               insets && !is_icon);
+#else
+    compute_content_rect(window_size, screen->content_size, is_icon,
+                         screen->render_fit, &screen->rect);
+#endif
 }
 
 // render the texture to the renderer
@@ -249,13 +302,18 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
 
     SDL_Renderer *renderer = screen->renderer;
     struct sc_screen_bg_color bg = screen->bg;
-    SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, 0);
-    sc_sdl_render_clear(renderer);
-
-    SDL_Texture *texture = screen->tex.texture;
-    if (!texture) {
-        goto end;
+    uint8_t bg_alpha = 255;
+#ifdef __APPLE__
+    bool transparent_margins = is_windowed(screen);
+    if (transparent_margins) {
+        // The margins around the video (outside the chrome) must be fully
+        // transparent, so the video appears to float like iPhone Mirroring
+        bg = (struct sc_screen_bg_color) {0, 0, 0};
+        bg_alpha = 0;
     }
+#endif
+    SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg_alpha);
+    sc_sdl_render_clear(renderer);
 
     float scale = SDL_GetWindowPixelDensity(screen->window);
     if (scale == 0) {
@@ -263,6 +321,27 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
         // is invalid
         LOGE("Cannot get scale value: %s", SDL_GetError());
         scale = 1;
+    }
+
+#ifdef __APPLE__
+    if (transparent_margins && screen->rect.w > 0 && screen->rect.h > 0) {
+        // Draw an opaque black "phone body" under the content rectangle, so
+        // it never becomes see-through (e.g. letterboxing inside the content
+        // area, or transient states between frames)
+        SDL_FRect body = {
+            .x = screen->rect.x * scale,
+            .y = screen->rect.y * scale,
+            .w = screen->rect.w * scale,
+            .h = screen->rect.h * scale,
+        };
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderFillRect(renderer, &body);
+    }
+#endif
+
+    SDL_Texture *texture = screen->tex.texture;
+    if (!texture) {
+        goto end;
     }
 
     SDL_FRect geometry = {
@@ -344,6 +423,15 @@ sc_screen_on_resize(struct sc_screen *screen, const SDL_WindowEvent *event) {
             assert(!(event->data2 & ~0xFFFF));
             uint16_t width = event->data1;
             uint16_t height = event->data2;
+#ifdef __APPLE__
+            if (is_windowed(screen)) {
+                // The window size includes the chrome insets
+                struct sc_size size = {width, height};
+                size = sc_macos_remove_insets(size);
+                width = size.width;
+                height = size.height;
+            }
+#endif
 
             struct sc_resize_tracker *tracker = &screen->resize_tracker;
             if (tracker->time
@@ -543,8 +631,15 @@ sc_screen_init(struct sc_screen *screen,
         window_flags |= SDL_WINDOW_BORDERLESS;
     }
     if (params->video) {
+#ifdef __APPLE__
+        // The window is fixed-size, like the iPhone Mirroring app: the chrome
+        // paddings keep exact proportions and the native zoom button is
+        // disabled automatically. The window is still resized programmatically
+        // (e.g. on device rotation).
+#else
         // The window will be shown on first frame
         window_flags |= SDL_WINDOW_RESIZABLE;
+#endif
     }
 
     const char *title = params->window_title;
@@ -756,6 +851,11 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
 
     assert(is_windowed(screen));
     set_aspect_ratio(screen, screen->content_size);
+#ifdef __APPLE__
+    // Enlarge the window so the video keeps its optimal size inside the
+    // chrome insets
+    window_size = sc_macos_add_insets(window_size);
+#endif
     sc_sdl_set_window_size(screen->window, window_size);
     sc_sdl_set_window_position(screen->window, position);
 
@@ -842,6 +942,10 @@ resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
     struct sc_size target_size = new_content_size;
     if (!screen->flex_display) {
         struct sc_size window_size = sc_sdl_get_window_size(screen->window);
+#ifdef __APPLE__
+        // Scale based on the content area, excluding the chrome insets
+        window_size = sc_macos_remove_insets(window_size);
+#endif
         // Scale proportionally
         target_size.width = (uint32_t) window_size.width * target_size.width
                           / old_content_size.width;
@@ -851,6 +955,9 @@ resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
     target_size = get_optimal_size(target_size, new_content_size, true);
     assert(is_windowed(screen));
     set_aspect_ratio(screen, new_content_size);
+#ifdef __APPLE__
+    target_size = sc_macos_add_insets(target_size);
+#endif
     sc_sdl_set_window_size(screen->window, target_size);
 }
 
@@ -1040,15 +1147,19 @@ sc_screen_resize_to_fit(struct sc_screen *screen) {
     if (screen->render_fit == SC_RENDER_FIT_UNSCALED) {
         struct sc_size content_size = screen->content_size;
         set_aspect_ratio(screen, content_size);
-        sc_sdl_set_window_size(screen->window, content_size);
+        struct sc_size new_window_size = content_size;
+#ifdef __APPLE__
+        new_window_size = sc_macos_add_insets(new_window_size);
+#endif
+        sc_sdl_set_window_size(screen->window, new_window_size);
 
         int32_t x_offset = 0;
-        if (content_size.width < window_size.width) {
-            x_offset = (window_size.width - content_size.width) / 2;
+        if (new_window_size.width < window_size.width) {
+            x_offset = (window_size.width - new_window_size.width) / 2;
         }
         int32_t y_offset = 0;
-        if (content_size.height < window_size.height) {
-            y_offset = (window_size.height - content_size.height) / 2;
+        if (new_window_size.height < window_size.height) {
+            y_offset = (window_size.height - new_window_size.height) / 2;
         }
         assert(x_offset >= 0 && y_offset >= 0);
         if (x_offset || y_offset) {
@@ -1067,8 +1178,15 @@ sc_screen_resize_to_fit(struct sc_screen *screen) {
 
     struct sc_point point = sc_sdl_get_window_position(screen->window);
 
+    struct sc_size content_area = window_size;
+#ifdef __APPLE__
+    content_area = sc_macos_remove_insets(content_area);
+#endif
     struct sc_size optimal_size =
-        get_optimal_size(window_size, screen->content_size, false);
+        get_optimal_size(content_area, screen->content_size, false);
+#ifdef __APPLE__
+    optimal_size = sc_macos_add_insets(optimal_size);
+#endif
 
     // Center the window related to the device screen
     assert(optimal_size.width <= window_size.width);
@@ -1096,7 +1214,11 @@ sc_screen_resize_to_pixel_perfect(struct sc_screen *screen) {
 
     struct sc_size content_size = screen->content_size;
     set_aspect_ratio(screen, content_size);
-    sc_sdl_set_window_size(screen->window, content_size);
+    struct sc_size new_window_size = content_size;
+#ifdef __APPLE__
+    new_window_size = sc_macos_add_insets(new_window_size);
+#endif
+    sc_sdl_set_window_size(screen->window, new_window_size);
     LOGD("Resized to pixel-perfect: %ux%u", content_size.width,
                                             content_size.height);
 }
