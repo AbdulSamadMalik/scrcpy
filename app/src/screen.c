@@ -27,6 +27,7 @@ set_aspect_ratio(struct sc_screen *screen, struct sc_size content_size) {
     // with fixed insets), so an aspect ratio lock is unnecessary; it would
     // also be incorrect, since the window includes the chrome insets
     (void) screen;
+    (void) content_size;
 #else
     if (screen->window_aspect_ratio_lock) {
         float ar = (float) content_size.width / content_size.height;
@@ -624,6 +625,14 @@ sc_screen_init(struct sc_screen *screen,
 
     // Always create the window hidden to prevent blinking during initialization
     uint32_t window_flags = SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
+#ifdef __APPLE__
+    // The chrome margins around the video must show the desktop through, so
+    // the video appears to float (iPhone-Mirroring-like). Without this flag,
+    // SDL paints an opaque black backdrop behind the (masked) video layer.
+    // It does not affect input: SDL only ignores mouse events on transparent
+    // windows when a window shape is set, which scrcpy never does.
+    window_flags |= SDL_WINDOW_TRANSPARENT;
+#endif
     if (params->always_on_top) {
         window_flags |= SDL_WINDOW_ALWAYS_ON_TOP;
     }
